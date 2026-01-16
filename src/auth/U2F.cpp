@@ -86,36 +86,31 @@ void CU2F::pollForDevice() {
             if (m_sState.deviceFound) {
                 // Device was removed
                 m_sState.deviceFound = false;
+                m_sState.waiting     = false;
                 m_sPrompt            = m_sReadyMessage;
+                Debug::log(LOG, "u2f: device removed");
                 g_pHyprlock->enqueueForceUpdateTimers();
             }
             std::this_thread::sleep_for(pollMs);
             continue;
         }
 
-        // Device found
+        // Device found - only update UI once when first detected
         if (!m_sState.deviceFound) {
             m_sState.deviceFound = true;
+            m_sState.waiting     = true;
             m_sPrompt            = m_sPresentMessage;
             Debug::log(LOG, "u2f: device detected, {} device(s) available", nDevs);
             g_pHyprlock->enqueueForceUpdateTimers();
+
+            // Validate device is accessible (just once)
+            const fido_dev_info_t* di   = fido_dev_info_ptr(devList, 0);
+            const char*            path = fido_dev_info_path(di);
+            tryAuthenticate(path);
         }
 
-        // Try to authenticate with the first available device
-        const fido_dev_info_t* di   = fido_dev_info_ptr(devList, 0);
-        const char*            path = fido_dev_info_path(di);
-
-        m_sState.waiting = true;
-        if (tryAuthenticate(path)) {
-            // Success - unlock
-            handleAuthResult(true);
-            break;
-        } else {
-            // Device present but auth not triggered yet (waiting for touch)
-            // or auth failed
-            m_sState.waiting = false;
-        }
-
+        // Device is present and waiting for PAM to complete authentication
+        // Just keep polling to detect if device is removed
         std::this_thread::sleep_for(pollMs);
     }
 
@@ -123,6 +118,11 @@ void CU2F::pollForDevice() {
 }
 
 bool CU2F::tryAuthenticate(const char* devicePath) {
+    // We only need to detect that the device is present
+    // The actual PAM U2F module handles the cryptographic authentication
+    // UI updates happen in pollForDevice() when device state changes
+    // This function just validates the device is accessible
+
     fido_dev_t* dev = fido_dev_new();
     if (!dev) {
         Debug::log(ERR, "u2f: failed to allocate device");
@@ -136,27 +136,10 @@ bool CU2F::tryAuthenticate(const char* devicePath) {
         return false;
     }
 
-    // Check if device has user presence (touch) waiting
-    // For now, we'll use a simple approach: try to get device info
-    // The actual PAM U2F auth will handle the cryptographic verification
-    // We just need to detect when the device is touched
-
-    bool hasUP = fido_dev_has_uv(dev) || fido_dev_has_pin(dev) || true; // Most FIDO2 devices support UP
-
-    if (hasUP) {
-        Debug::log(LOG, "u2f: device supports user presence verification");
-        m_sPrompt = m_sPresentMessage;
-        g_pHyprlock->enqueueForceUpdateTimers();
-    }
-
     fido_dev_close(dev);
     fido_dev_free(&dev);
 
-    // Since we're using PAM for actual auth, we just detect device presence
-    // The PAM u2f module will handle the actual authentication
-    // We return false here to let the poll continue - actual unlock
-    // happens when PAM succeeds (triggered by user pressing Enter or auto-trigger)
-
+    // Return false - PAM handles the actual unlock via pam_u2f
     return false;
 }
 
