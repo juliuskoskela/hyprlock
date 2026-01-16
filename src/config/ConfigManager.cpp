@@ -230,7 +230,11 @@ void CConfigManager::init() {
     m_config.addConfigValue("auth:u2f:enabled", Hyprlang::INT{0});
     m_config.addConfigValue("auth:u2f:ready_message", Hyprlang::STRING{"(Insert security key)"});
     m_config.addConfigValue("auth:u2f:present_message", Hyprlang::STRING{"Touch security key"});
+    m_config.addConfigValue("auth:u2f:verifying_message", Hyprlang::STRING{"Verifying..."});
     m_config.addConfigValue("auth:u2f:poll_interval", Hyprlang::INT{100});
+    m_config.addConfigValue("auth:u2f:rp_id", Hyprlang::STRING{"pam://yubi"});
+    m_config.addConfigValue("auth:u2f:authfile", Hyprlang::STRING{""});
+    m_config.addConfigValue("auth:u2f:timeout", Hyprlang::INT{30000});
 
     m_config.addConfigValue("animations:enabled", Hyprlang::INT{1});
 
