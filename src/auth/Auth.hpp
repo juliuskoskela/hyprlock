@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -51,8 +53,8 @@ class CAuth {
 
     void                       resetDisplayFail();
 
-    // Should only be set via the main thread
-    bool m_bDisplayFailText = false;
+    // Thread-safe flag for display state
+    std::atomic<bool> m_bDisplayFailText{false};
 
   private:
     struct {
@@ -62,6 +64,7 @@ class CAuth {
     } m_sCurrentFail;
 
     std::vector<SP<IAuthImplementation>> m_vImpls;
+    std::mutex                           m_timerMutex;
     ASP<CTimer>                          m_resetDisplayFailTimer;
 };
 

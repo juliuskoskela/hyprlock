@@ -41,7 +41,13 @@ int conv(int num_msg, const struct pam_message** msg, struct pam_response** resp
                 if (g_pHyprlock->isUnlocked())
                     return PAM_CONV_ERR;
 
-                pamReply[i].resp = strdup(CONVERSATIONSTATE->input.c_str());
+                char* resp = strdup(CONVERSATIONSTATE->input.c_str());
+                if (!resp) {
+                    Debug::log(ERR, "PAM: strdup failed - out of memory");
+                    free(pamReply);
+                    return PAM_BUF_ERR;
+                }
+                pamReply[i].resp = resp;
                 initialPrompt    = false;
             } break;
             case PAM_ERROR_MSG: Debug::log(ERR, "PAM: {}", msg[i]->msg); break;
@@ -73,7 +79,7 @@ CPam::CPam() {
 }
 
 CPam::~CPam() {
-    ;
+    terminate();
 }
 
 void CPam::init() {
@@ -160,14 +166,17 @@ void CPam::handleInput(const std::string& input) {
 }
 
 std::optional<std::string> CPam::getLastFailText() {
+    std::lock_guard<std::mutex> lock(m_sConversationState.inputMutex);
     return m_sConversationState.failText.empty() ? std::nullopt : std::optional(m_sConversationState.failText);
 }
 
 std::optional<std::string> CPam::getLastPrompt() {
+    std::lock_guard<std::mutex> lock(m_sConversationState.inputMutex);
     return m_sConversationState.prompt.empty() ? std::nullopt : std::optional(m_sConversationState.prompt);
 }
 
 bool CPam::checkWaiting() {
+    std::lock_guard<std::mutex> lock(m_sConversationState.inputMutex);
     return m_bBlockInput || m_sConversationState.waitingForPamAuth;
 }
 

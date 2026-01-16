@@ -112,17 +112,24 @@ void CAuth::enqueueFail(const std::string& failText, eAuthImplementations implTy
 
     Debug::log(LOG, "Failed attempts: {}", m_sCurrentFail.failedAttempts);
 
+    {
+        std::lock_guard<std::mutex> lock(m_timerMutex);
+        if (m_resetDisplayFailTimer) {
+            m_resetDisplayFailTimer->cancel();
+            m_resetDisplayFailTimer.reset();
+        }
+        m_resetDisplayFailTimer = g_pHyprlock->addTimer(std::chrono::milliseconds(*FAILTIMEOUT), displayFailTimeoutCallback, nullptr);
+    }
+
+    g_pHyprlock->addTimer(std::chrono::milliseconds(0), passwordFailCallback, nullptr);
+}
+
+void CAuth::resetDisplayFail() {
+    m_bDisplayFailText = false;
+
+    std::lock_guard<std::mutex> lock(m_timerMutex);
     if (m_resetDisplayFailTimer) {
         m_resetDisplayFailTimer->cancel();
         m_resetDisplayFailTimer.reset();
     }
-
-    g_pHyprlock->addTimer(std::chrono::milliseconds(0), passwordFailCallback, nullptr);
-    m_resetDisplayFailTimer = g_pHyprlock->addTimer(std::chrono::milliseconds(*FAILTIMEOUT), displayFailTimeoutCallback, nullptr);
-}
-
-void CAuth::resetDisplayFail() {
-    g_pAuth->m_bDisplayFailText = false;
-    m_resetDisplayFailTimer->cancel();
-    m_resetDisplayFailTimer.reset();
 }

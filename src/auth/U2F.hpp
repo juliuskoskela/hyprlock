@@ -3,6 +3,7 @@
 #include "Auth.hpp"
 
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -29,19 +30,17 @@ class CU2F : public IAuthImplementation {
         std::atomic<bool> abort       = false;
         std::atomic<bool> done        = false;
         std::atomic<bool> deviceFound = false;
-        std::atomic<bool> waiting     = false;
-        int               retries     = 0;
     } m_sState;
 
     std::string m_sReadyMessage;
     std::string m_sPresentMessage;
 
-    std::string m_sPrompt{""};
-    std::string m_sFailureReason{""};
+    mutable std::mutex m_stringMutex;  // Protects m_sPrompt and m_sFailureReason
+    std::string        m_sPrompt{""};
+    std::string        m_sFailureReason{""};
 
     std::thread m_pollThread;
 
     void pollForDevice();
     bool tryAuthenticate(const char* devicePath);
-    void handleAuthResult(bool success, const std::string& error = "");
 };
