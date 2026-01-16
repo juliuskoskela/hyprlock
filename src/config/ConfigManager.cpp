@@ -227,6 +227,11 @@ void CConfigManager::init() {
     m_config.addConfigValue("auth:fingerprint:present_message", Hyprlang::STRING{"Scanning fingerprint"});
     m_config.addConfigValue("auth:fingerprint:retry_delay", Hyprlang::INT{250});
 
+    m_config.addConfigValue("auth:u2f:enabled", Hyprlang::INT{0});
+    m_config.addConfigValue("auth:u2f:ready_message", Hyprlang::STRING{"(Insert security key)"});
+    m_config.addConfigValue("auth:u2f:present_message", Hyprlang::STRING{"Touch security key"});
+    m_config.addConfigValue("auth:u2f:poll_interval", Hyprlang::INT{100});
+
     m_config.addConfigValue("animations:enabled", Hyprlang::INT{1});
 
     m_config.addSpecialCategory("background", Hyprlang::SSpecialCategoryOptions{.key = nullptr, .anonymousKeyBased = true});

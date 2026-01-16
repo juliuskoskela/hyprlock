@@ -12,6 +12,7 @@
   hyprlang,
   hyprutils,
   hyprwayland-scanner,
+  libfido2,
   pam,
   pango,
   sdbus-cpp_2,
@@ -44,6 +45,7 @@ stdenv.mkDerivation {
     hyprgraphics
     hyprlang
     hyprutils
+    libfido2
     pam
     pango
     sdbus-cpp_2

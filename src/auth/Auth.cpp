@@ -1,6 +1,7 @@
 #include "Auth.hpp"
 #include "Pam.hpp"
 #include "Fingerprint.hpp"
+#include "U2F.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../core/hyprlock.hpp"
 #include "src/helpers/Log.hpp"
@@ -15,6 +16,9 @@ CAuth::CAuth() {
     static const auto ENABLEFINGERPRINT = g_pConfigManager->getValue<Hyprlang::INT>("auth:fingerprint:enabled");
     if (*ENABLEFINGERPRINT)
         m_vImpls.emplace_back(makeShared<CFingerprint>());
+    static const auto ENABLEU2F = g_pConfigManager->getValue<Hyprlang::INT>("auth:u2f:enabled");
+    if (*ENABLEU2F)
+        m_vImpls.emplace_back(makeShared<CU2F>());
 
     RASSERT(!m_vImpls.empty(), "At least one authentication method must be enabled!");
 }
