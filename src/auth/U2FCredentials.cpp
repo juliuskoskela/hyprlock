@@ -27,9 +27,12 @@ std::vector<uint8_t> CU2FCredentials::base64UrlDecode(const std::string& input) 
         base64 += '=';
     }
 
-    // Decode
-    int  val = 0;
-    int  bits = 0;
+    // Reserve approximate output size (3/4 of input)
+    result.reserve((base64.size() * 3) / 4);
+
+    // Decode using unsigned types to prevent integer overflow
+    uint32_t val  = 0;
+    int      bits = 0;
 
     for (char c : base64) {
         if (c == '=')
@@ -37,11 +40,13 @@ std::vector<uint8_t> CU2FCredentials::base64UrlDecode(const std::string& input) 
 
         size_t pos = BASE64_CHARS.find(c);
         if (pos == std::string::npos) {
-            Debug::log(WARN, "u2f credentials: invalid base64 character: {}", c);
-            continue;
+            // Invalid character - fail the entire decode to prevent corruption
+            Debug::log(WARN, "u2f credentials: invalid base64 character '{}' in input", c);
+            result.clear();
+            return result;
         }
 
-        val = (val << 6) | static_cast<int>(pos);
+        val = ((val << 6) | static_cast<uint32_t>(pos)) & 0xFFFFFFFF;
         bits += 6;
 
         if (bits >= 8) {
@@ -93,11 +98,22 @@ std::optional<SU2FCredential> CU2FCredentials::parseCredentialEntry(const std::s
         Debug::log(WARN, "u2f credentials: failed to decode keyhandle");
         return std::nullopt;
     }
+    // Credential IDs are typically 32-255 bytes; reject obviously invalid sizes
+    if (cred.credentialId.size() < 16 || cred.credentialId.size() > 1024) {
+        Debug::log(WARN, "u2f credentials: keyhandle has invalid size ({} bytes)", cred.credentialId.size());
+        return std::nullopt;
+    }
 
     // Field 1: public key
     cred.publicKey = base64UrlDecode(fields[1]);
     if (cred.publicKey.empty()) {
         Debug::log(WARN, "u2f credentials: failed to decode public key");
+        return std::nullopt;
+    }
+    // ES256 public keys are 65 bytes (uncompressed) or 64 bytes (raw X,Y coordinates)
+    // COSE format adds overhead, so allow 64-256 bytes
+    if (cred.publicKey.size() < 64 || cred.publicKey.size() > 512) {
+        Debug::log(WARN, "u2f credentials: public key has invalid size ({} bytes)", cred.publicKey.size());
         return std::nullopt;
     }
 
@@ -131,9 +147,17 @@ bool CU2FCredentials::parseCredentialLine(const std::string& line, const std::st
 
     std::string username = line.substr(0, colonPos);
 
-    // Trim whitespace from username
-    username.erase(0, username.find_first_not_of(" \t"));
-    username.erase(username.find_last_not_of(" \t") + 1);
+    // Trim whitespace from username (handle all-whitespace case safely)
+    size_t firstNonSpace = username.find_first_not_of(" \t");
+    if (firstNonSpace == std::string::npos) {
+        // Username is all whitespace - skip this line
+        return false;
+    }
+    username.erase(0, firstNonSpace);
+    size_t lastNonSpace = username.find_last_not_of(" \t");
+    if (lastNonSpace != std::string::npos) {
+        username.erase(lastNonSpace + 1);
+    }
 
     if (username != targetUser)
         return false;
@@ -212,9 +236,16 @@ bool CU2FCredentials::loadForCurrentUser() {
         paths.push_back(std::string(pw->pw_dir) + "/.config/Yubico/u2f_keys");
     }
 
-    // 2. XDG config home
+    // 2. XDG config home (validate to prevent path traversal)
     if (const char* xdgConfig = getenv("XDG_CONFIG_HOME")) {
-        paths.push_back(std::string(xdgConfig) + "/Yubico/u2f_keys");
+        std::string configPath = xdgConfig;
+        // Must be absolute path and not contain path traversal
+        if (!configPath.empty() && configPath[0] == '/' &&
+            configPath.find("..") == std::string::npos) {
+            paths.push_back(configPath + "/Yubico/u2f_keys");
+        } else {
+            Debug::log(WARN, "u2f credentials: ignoring invalid XDG_CONFIG_HOME path");
+        }
     }
 
     // 3. System-wide location

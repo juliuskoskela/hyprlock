@@ -2,7 +2,9 @@
 
 #include "Auth.hpp"
 
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <sdbus-c++/sdbus-c++.h>
@@ -30,24 +32,26 @@ class CFingerprint : public IAuthImplementation {
         std::unique_ptr<sdbus::IProxy>      login;
         std::unique_ptr<sdbus::IProxy>      device;
 
-        bool                                abort     = false;
-        bool                                done      = false;
-        int                                 retries   = 0;
-        bool                                sleeping  = false;
-        bool                                verifying = false;
+        // Atomic flags for thread-safe access from D-Bus callbacks
+        std::atomic<bool> abort{false};
+        std::atomic<bool> done{false};
+        std::atomic<int>  retries{0};
+        std::atomic<bool> sleeping{false};
+        std::atomic<bool> verifying{false};
     } m_sDBUSState;
 
     std::string m_sFingerprintReady;
     std::string m_sFingerprintPresent;
 
-    std::string m_sPrompt{""};
-    std::string m_sFailureReason{""};
+    mutable std::mutex m_promptMutex;  // Protects m_sPrompt and m_sFailureReason
+    std::string        m_sPrompt{""};
+    std::string        m_sFailureReason{""};
 
-    void        handleVerifyStatus(const std::string& result, const bool done);
+    void handleVerifyStatus(const std::string& result, const bool done);
 
-    bool        createDeviceProxy();
-    void        claimDevice();
-    void        startVerify(bool isRetry = false);
-    bool        stopVerify();
-    bool        releaseDevice();
+    bool createDeviceProxy();
+    void claimDevice();
+    void startVerify(bool isRetry = false);
+    bool stopVerify();
+    bool releaseDevice();
 };

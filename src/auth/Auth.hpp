@@ -62,6 +62,7 @@ class CAuth {
         eAuthImplementations failSource     = AUTH_IMPL_PAM;
         size_t               failedAttempts = 0;
     } m_sCurrentFail;
+    mutable std::mutex m_currentFailMutex;  // Protects m_sCurrentFail
 
     std::vector<SP<IAuthImplementation>> m_vImpls;
     std::mutex                           m_timerMutex;

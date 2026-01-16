@@ -14,16 +14,53 @@
 #include <cstring>
 #include <thread>
 
+// Helper to clean up partially-filled PAM response array
+static void cleanupPamReply(struct pam_response* reply, int count) {
+    if (!reply)
+        return;
+    for (int i = 0; i < count; ++i) {
+        if (reply[i].resp) {
+            free(reply[i].resp);
+            reply[i].resp = nullptr;
+        }
+    }
+    free(reply);
+}
+
 int conv(int num_msg, const struct pam_message** msg, struct pam_response** resp, void* appdata_ptr) {
+    // Validate inputs
+    if (!msg || !resp || !appdata_ptr || num_msg <= 0 || num_msg > 256) {
+        Debug::log(ERR, "PAM: invalid conversation parameters");
+        return PAM_CONV_ERR;
+    }
+
     const auto           CONVERSATIONSTATE = (CPam::SPamConversationState*)appdata_ptr;
     struct pam_response* pamReply          = (struct pam_response*)calloc(num_msg, sizeof(struct pam_response));
-    bool                 initialPrompt     = true;
+
+    if (!pamReply) {
+        Debug::log(ERR, "PAM: failed to allocate response buffer");
+        return PAM_BUF_ERR;
+    }
+
+    bool initialPrompt    = true;
+    int  allocatedResponses = 0;  // Track how many responses we've allocated for cleanup
 
     for (int i = 0; i < num_msg; ++i) {
+        // Validate message pointer
+        if (!msg[i]) {
+            Debug::log(WARN, "PAM: null message at index {}", i);
+            continue;
+        }
+
         switch (msg[i]->msg_style) {
             case PAM_PROMPT_ECHO_OFF:
             case PAM_PROMPT_ECHO_ON: {
-                const auto PROMPT        = std::string(msg[i]->msg);
+                // Validate message text
+                const char* msgText = msg[i]->msg;
+                if (!msgText)
+                    msgText = "";
+
+                const auto PROMPT        = std::string(msgText);
                 const auto PROMPTCHANGED = PROMPT != CONVERSATIONSTATE->prompt;
                 Debug::log(LOG, "PAM_PROMPT: {}", PROMPT);
 
@@ -38,27 +75,36 @@ int conv(int num_msg, const struct pam_message** msg, struct pam_response** resp
                 }
 
                 // Needed for unlocks via SIGUSR1
-                if (g_pHyprlock->isUnlocked())
+                if (g_pHyprlock->isUnlocked()) {
+                    cleanupPamReply(pamReply, allocatedResponses);
                     return PAM_CONV_ERR;
+                }
 
-                char* resp = strdup(CONVERSATIONSTATE->input.c_str());
-                if (!resp) {
+                char* respStr = strdup(CONVERSATIONSTATE->input.c_str());
+                if (!respStr) {
                     Debug::log(ERR, "PAM: strdup failed - out of memory");
-                    free(pamReply);
+                    cleanupPamReply(pamReply, allocatedResponses);
                     return PAM_BUF_ERR;
                 }
-                pamReply[i].resp = resp;
+                pamReply[i].resp = respStr;
+                allocatedResponses = i + 1;  // Track for cleanup
                 initialPrompt    = false;
             } break;
-            case PAM_ERROR_MSG: Debug::log(ERR, "PAM: {}", msg[i]->msg); break;
-            case PAM_TEXT_INFO:
-                Debug::log(LOG, "PAM: {}", msg[i]->msg);
-                // Targets this log from pam_faillock: https://github.com/linux-pam/linux-pam/blob/fa3295e079dbbc241906f29bde5fb71bc4172771/modules/pam_faillock/pam_faillock.c#L417
-                if (const auto MSG = std::string(msg[i]->msg); MSG.contains("left to unlock")) {
+            case PAM_ERROR_MSG: {
+                const char* msgText = msg[i]->msg ? msg[i]->msg : "(null)";
+                Debug::log(ERR, "PAM: {}", msgText);
+            } break;
+            case PAM_TEXT_INFO: {
+                const char* msgText = msg[i]->msg;
+                if (!msgText)
+                    break;
+                Debug::log(LOG, "PAM: {}", msgText);
+                // Targets this log from pam_faillock
+                if (const auto MSG = std::string(msgText); MSG.contains("left to unlock")) {
                     CONVERSATIONSTATE->failText        = MSG;
                     CONVERSATIONSTATE->failTextFromPam = true;
                 }
-                break;
+            } break;
         }
     }
 

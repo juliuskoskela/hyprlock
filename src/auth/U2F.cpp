@@ -12,6 +12,7 @@
 // For secure random generation
 #include <fcntl.h>
 #include <unistd.h>
+#include <cerrno>
 
 // RAII wrapper for fido_dev_info_t to prevent resource leaks
 class FidoDevInfoGuard {
@@ -98,6 +99,23 @@ class FidoAssertGuard {
     fido_assert_t* m_assert = nullptr;
 };
 
+// RAII guard to ensure authenticating state is always reset
+class AuthenticatingGuard {
+  public:
+    AuthenticatingGuard(std::atomic<bool>& flag) : m_flag(flag) {
+        m_flag = true;
+    }
+    ~AuthenticatingGuard() {
+        m_flag = false;
+    }
+
+    AuthenticatingGuard(const AuthenticatingGuard&)            = delete;
+    AuthenticatingGuard& operator=(const AuthenticatingGuard&) = delete;
+
+  private:
+    std::atomic<bool>& m_flag;
+};
+
 CU2F::CU2F() {
     // Load UI messages
     static const auto READYMSG = g_pConfigManager->getValue<Hyprlang::STRING>("auth:u2f:ready_message");
@@ -160,7 +178,23 @@ void CU2F::init() {
     }
 
     // Start polling for U2F device in background thread
-    m_pollThread = std::thread(&CU2F::pollForDevice, this);
+    try {
+        m_pollThread = std::thread(&CU2F::pollForDevice, this);
+    } catch (const std::system_error& e) {
+        Debug::log(ERR, "u2f: failed to create polling thread: {}", e.what());
+        m_sState.done = true;
+        {
+            std::lock_guard<std::mutex> lock(m_stringMutex);
+            m_sFailureReason = "Failed to initialize U2F";
+        }
+        return;
+    }
+
+    if (!m_pollThread.joinable()) {
+        Debug::log(ERR, "u2f: polling thread not joinable after creation");
+        m_sState.done = true;
+        return;
+    }
 
     Debug::log(LOG, "u2f: initialized, waiting for device");
     g_pHyprlock->enqueueForceUpdateTimers();
@@ -198,19 +232,39 @@ void CU2F::terminate() {
 }
 
 bool CU2F::generateChallenge(unsigned char* buffer, size_t length) {
+    if (!buffer || length == 0)
+        return false;
+
     // Read from /dev/urandom for cryptographically secure random bytes
     int fd = open("/dev/urandom", O_RDONLY);
     if (fd < 0) {
-        Debug::log(ERR, "u2f: failed to open /dev/urandom");
+        Debug::log(ERR, "u2f: failed to open /dev/urandom: {}", strerror(errno));
         return false;
     }
 
-    ssize_t bytesRead = read(fd, buffer, length);
-    close(fd);
+    // Loop to handle partial reads (can happen on interrupt)
+    size_t totalRead = 0;
+    while (totalRead < length) {
+        ssize_t bytesRead = read(fd, buffer + totalRead, length - totalRead);
+        if (bytesRead < 0) {
+            if (errno == EINTR)
+                continue;  // Interrupted, retry
+            Debug::log(ERR, "u2f: read from /dev/urandom failed: {}", strerror(errno));
+            close(fd);
+            return false;
+        }
+        if (bytesRead == 0) {
+            // EOF on /dev/urandom should never happen
+            Debug::log(ERR, "u2f: unexpected EOF on /dev/urandom");
+            close(fd);
+            return false;
+        }
+        totalRead += static_cast<size_t>(bytesRead);
+    }
 
-    if (bytesRead != static_cast<ssize_t>(length)) {
-        Debug::log(ERR, "u2f: failed to read {} bytes from /dev/urandom", length);
-        return false;
+    if (close(fd) < 0) {
+        Debug::log(WARN, "u2f: close() on /dev/urandom failed: {}", strerror(errno));
+        // Non-fatal - we got our random bytes
     }
 
     return true;
@@ -307,7 +361,8 @@ bool CU2F::performAssertion(const char* devicePath) {
         return false;
     }
 
-    m_sState.authenticating = true;
+    // RAII guard ensures authenticating is always reset on exit
+    AuthenticatingGuard authGuard(m_sState.authenticating);
 
     // Update UI to show we're verifying
     {
@@ -323,7 +378,6 @@ bool CU2F::performAssertion(const char* devicePath) {
     unsigned char    challenge[CHALLENGE_SIZE];
     if (!generateChallenge(challenge, CHALLENGE_SIZE)) {
         Debug::log(ERR, "u2f: failed to generate challenge");
-        m_sState.authenticating = false;
         {
             std::lock_guard<std::mutex> lock(m_stringMutex);
             m_sFailureReason = "Failed to generate challenge";
@@ -336,7 +390,6 @@ bool CU2F::performAssertion(const char* devicePath) {
     FidoAssertGuard assertion;
     if (!assertion) {
         Debug::log(ERR, "u2f: failed to allocate assertion");
-        m_sState.authenticating = false;
         return false;
     }
 
@@ -344,7 +397,6 @@ bool CU2F::performAssertion(const char* devicePath) {
     int r = fido_assert_set_rp(assertion.get(), m_sRelyingPartyId.c_str());
     if (r != FIDO_OK) {
         Debug::log(ERR, "u2f: fido_assert_set_rp failed: {}", fido_strerr(r));
-        m_sState.authenticating = false;
         return false;
     }
 
@@ -352,7 +404,6 @@ bool CU2F::performAssertion(const char* devicePath) {
     r = fido_assert_set_clientdata_hash(assertion.get(), challenge, CHALLENGE_SIZE);
     if (r != FIDO_OK) {
         Debug::log(ERR, "u2f: fido_assert_set_clientdata_hash failed: {}", fido_strerr(r));
-        m_sState.authenticating = false;
         return false;
     }
 
@@ -360,7 +411,6 @@ bool CU2F::performAssertion(const char* devicePath) {
     r = fido_assert_set_up(assertion.get(), FIDO_OPT_TRUE);
     if (r != FIDO_OK) {
         Debug::log(ERR, "u2f: fido_assert_set_up failed: {}", fido_strerr(r));
-        m_sState.authenticating = false;
         return false;
     }
 
@@ -376,13 +426,11 @@ bool CU2F::performAssertion(const char* devicePath) {
     FidoDevGuard dev;
     if (!dev) {
         Debug::log(ERR, "u2f: failed to allocate device");
-        m_sState.authenticating = false;
         return false;
     }
 
     if (!dev.open(devicePath)) {
         Debug::log(ERR, "u2f: failed to open device {}", devicePath);
-        m_sState.authenticating = false;
         {
             std::lock_guard<std::mutex> lock(m_stringMutex);
             m_sFailureReason = "Failed to open security key";
@@ -391,8 +439,11 @@ bool CU2F::performAssertion(const char* devicePath) {
         return false;
     }
 
-    // Set timeout
-    fido_dev_set_timeout(dev.get(), m_iTimeout);
+    // Set timeout (log but don't fail on error - it's non-fatal)
+    r = fido_dev_set_timeout(dev.get(), m_iTimeout);
+    if (r != FIDO_OK) {
+        Debug::log(WARN, "u2f: fido_dev_set_timeout failed: {} (continuing anyway)", fido_strerr(r));
+    }
 
     Debug::log(LOG, "u2f: requesting assertion (waiting for touch)...");
 
@@ -401,14 +452,12 @@ bool CU2F::performAssertion(const char* devicePath) {
 
     if (m_sState.abort) {
         // Abort was requested during the blocking call
-        m_sState.authenticating = false;
         return false;
     }
 
     if (r != FIDO_OK) {
         Debug::log(WARN, "u2f: fido_dev_get_assert failed: {}", fido_strerr(r));
-        m_sState.authenticating = false;
-        m_sState.deviceFound    = false;  // Reset to allow retry
+        m_sState.deviceFound = false;  // Reset to allow retry
 
         std::string errorMsg;
         switch (r) {
@@ -434,17 +483,14 @@ bool CU2F::performAssertion(const char* devicePath) {
     for (const auto& cred : m_credentials.getCredentials()) {
         if (verifyAssertionSignature(assertion.get(), cred)) {
             Debug::log(LOG, "u2f: signature verified successfully!");
-            m_sState.authenticating = false;
-
-            // SUCCESS - trigger unlock
+            // SUCCESS - trigger unlock (AuthenticatingGuard resets state on return)
             g_pAuth->enqueueUnlock();
             return true;
         }
     }
 
     Debug::log(WARN, "u2f: signature verification failed for all credentials");
-    m_sState.authenticating = false;
-    m_sState.deviceFound    = false;  // Reset to allow retry
+    m_sState.deviceFound = false;  // Reset to allow retry
 
     {
         std::lock_guard<std::mutex> lock(m_stringMutex);

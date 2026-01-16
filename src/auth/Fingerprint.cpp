@@ -80,12 +80,14 @@ void CFingerprint::handleInput(const std::string& input) {
 }
 
 std::optional<std::string> CFingerprint::getLastFailText() {
+    std::lock_guard<std::mutex> lock(m_promptMutex);
     if (!m_sFailureReason.empty())
         return std::optional(m_sFailureReason);
     return std::nullopt;
 }
 
 std::optional<std::string> CFingerprint::getLastPrompt() {
+    std::lock_guard<std::mutex> lock(m_promptMutex);
     if (!m_sPrompt.empty())
         return std::optional(m_sPrompt);
     return std::nullopt;
@@ -131,7 +133,10 @@ bool CFingerprint::createDeviceProxy() {
                 bool       isPresent      = presentVariant.get<bool>();
                 if (!isPresent)
                     return;
-                m_sPrompt = m_sFingerprintPresent;
+                {
+                    std::lock_guard<std::mutex> lock(m_promptMutex);
+                    m_sPrompt = m_sFingerprintPresent;
+                }
                 g_pHyprlock->enqueueForceUpdateTimers();
             } catch (std::out_of_range& e) {}
         });
@@ -144,59 +149,68 @@ void CFingerprint::handleVerifyStatus(const std::string& result, bool done) {
     auto matchResult   = s_mapStringToTestType[result];
     bool authenticated = false;
     bool retry         = false;
+    std::string failReason;  // Local copy for thread-safe access
+
     if (m_sDBUSState.sleeping) {
         stopVerify();
         Debug::log(LOG, "fprint: device suspended");
         return;
     }
-    switch (matchResult) {
-        case MATCH_INVALID: Debug::log(WARN, "fprint: unknown status: {}", result); break;
-        case MATCH_NO_MATCH:
-            stopVerify();
-            if (m_sDBUSState.retries >= 3) {
-                m_sFailureReason = "Fingerprint auth disabled (too many failed attempts)";
-            } else {
-                done                         = false;
-                static const auto RETRYDELAY = g_pConfigManager->getValue<Hyprlang::INT>("auth:fingerprint:retry_delay");
-                g_pHyprlock->addTimer(std::chrono::milliseconds(*RETRYDELAY), [](ASP<CTimer> self, void* data) { ((CFingerprint*)data)->startVerify(true); }, this);
-                m_sFailureReason = "Fingerprint did not match";
-            }
-            break;
-        case MATCH_UNKNOWN_ERROR:
-            stopVerify();
-            m_sFailureReason = "Fingerprint auth disabled (unknown error)";
-            break;
-        case MATCH_MATCHED:
-            stopVerify();
-            authenticated = true;
-            g_pAuth->enqueueUnlock();
-            break;
-        case MATCH_RETRY:
-            retry     = true;
-            m_sPrompt = "Please retry fingerprint scan";
-            break;
-        case MATCH_SWIPE_TOO_SHORT:
-            retry     = true;
-            m_sPrompt = "Swipe too short - try again";
-            break;
-        case MATCH_FINGER_NOT_CENTERED:
-            retry     = true;
-            m_sPrompt = "Finger not centered - try again";
-            break;
-        case MATCH_REMOVE_AND_RETRY:
-            retry     = true;
-            m_sPrompt = "Remove your finger and try again";
-            break;
-        case MATCH_DISCONNECTED:
-            m_sFailureReason   = "Fingerprint device disconnected";
-            m_sDBUSState.abort = true;
-            break;
+
+    {
+        std::lock_guard<std::mutex> lock(m_promptMutex);
+        switch (matchResult) {
+            case MATCH_INVALID: Debug::log(WARN, "fprint: unknown status: {}", result); break;
+            case MATCH_NO_MATCH:
+                stopVerify();
+                if (m_sDBUSState.retries >= 3) {
+                    m_sFailureReason = "Fingerprint auth disabled (too many failed attempts)";
+                } else {
+                    done = false;
+                    static const auto RETRYDELAY = g_pConfigManager->getValue<Hyprlang::INT>("auth:fingerprint:retry_delay");
+                    g_pHyprlock->addTimer(std::chrono::milliseconds(*RETRYDELAY), [](ASP<CTimer> self, void* data) { ((CFingerprint*)data)->startVerify(true); }, this);
+                    m_sFailureReason = "Fingerprint did not match";
+                }
+                break;
+            case MATCH_UNKNOWN_ERROR:
+                stopVerify();
+                m_sFailureReason = "Fingerprint auth disabled (unknown error)";
+                break;
+            case MATCH_MATCHED:
+                stopVerify();
+                authenticated = true;
+                break;
+            case MATCH_RETRY:
+                retry     = true;
+                m_sPrompt = "Please retry fingerprint scan";
+                break;
+            case MATCH_SWIPE_TOO_SHORT:
+                retry     = true;
+                m_sPrompt = "Swipe too short - try again";
+                break;
+            case MATCH_FINGER_NOT_CENTERED:
+                retry     = true;
+                m_sPrompt = "Finger not centered - try again";
+                break;
+            case MATCH_REMOVE_AND_RETRY:
+                retry     = true;
+                m_sPrompt = "Remove your finger and try again";
+                break;
+            case MATCH_DISCONNECTED:
+                m_sFailureReason   = "Fingerprint device disconnected";
+                m_sDBUSState.abort = true;
+                break;
+        }
+        failReason = m_sFailureReason;  // Copy while holding lock
     }
 
-    if (!authenticated && !retry)
-        g_pAuth->enqueueFail(m_sFailureReason, AUTH_IMPL_FINGERPRINT);
-    else if (retry)
+    if (authenticated) {
+        g_pAuth->enqueueUnlock();
+    } else if (!retry) {
+        g_pAuth->enqueueFail(failReason, AUTH_IMPL_FINGERPRINT);
+    } else {
         g_pHyprlock->enqueueForceUpdateTimers();
+    }
 
     if (done || m_sDBUSState.abort)
         m_sDBUSState.done = true;
@@ -227,16 +241,19 @@ void CFingerprint::startVerify(bool isRetry) {
     m_sDBUSState.device->callMethodAsync("VerifyStart").onInterface(DEVICE).withArguments(finger).uponReplyInvoke([this, isRetry](std::optional<sdbus::Error> e) {
         if (e) {
             Debug::log(WARN, "fprint: could not start verifying, {}", e->what());
-            if (isRetry)
+            if (isRetry) {
+                std::lock_guard<std::mutex> lock(m_promptMutex);
                 m_sFailureReason = "Fingerprint auth disabled (failed to restart)";
-
+            }
         } else {
             Debug::log(LOG, "fprint: started verifying");
+            std::lock_guard<std::mutex> lock(m_promptMutex);
             if (isRetry) {
                 m_sDBUSState.retries++;
                 m_sPrompt = "Could not match fingerprint. Try again.";
-            } else
+            } else {
                 m_sPrompt = m_sFingerprintReady;
+            }
         }
         g_pHyprlock->enqueueForceUpdateTimers();
     });

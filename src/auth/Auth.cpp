@@ -42,6 +42,7 @@ bool CAuth::checkWaiting() {
 }
 
 const std::string& CAuth::getCurrentFailText() {
+    std::lock_guard<std::mutex> lock(m_currentFailMutex);
     return m_sCurrentFail.failText;
 }
 
@@ -62,6 +63,7 @@ std::optional<std::string> CAuth::getPrompt(eAuthImplementations implType) {
 }
 
 size_t CAuth::getFailedAttempts() {
+    std::lock_guard<std::mutex> lock(m_currentFailMutex);
     return m_sCurrentFail.failedAttempts;
 }
 
@@ -97,8 +99,9 @@ static void passwordFailCallback(ASP<CTimer> self, void* data) {
 }
 
 static void displayFailTimeoutCallback(ASP<CTimer> self, void* data) {
-    if (g_pAuth->m_bDisplayFailText) {
-        g_pAuth->m_bDisplayFailText = false;
+    // Use atomic exchange to avoid TOCTOU race condition
+    bool wasDisplaying = g_pAuth->m_bDisplayFailText.exchange(false);
+    if (wasDisplaying) {
         g_pHyprlock->renderAllOutputs();
     }
 }
@@ -106,11 +109,16 @@ static void displayFailTimeoutCallback(ASP<CTimer> self, void* data) {
 void CAuth::enqueueFail(const std::string& failText, eAuthImplementations implType) {
     static const auto FAILTIMEOUT = g_pConfigManager->getValue<Hyprlang::INT>("general:fail_timeout");
 
-    m_sCurrentFail.failText   = failText;
-    m_sCurrentFail.failSource = implType;
-    m_sCurrentFail.failedAttempts++;
+    size_t attempts = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_currentFailMutex);
+        m_sCurrentFail.failText   = failText;
+        m_sCurrentFail.failSource = implType;
+        m_sCurrentFail.failedAttempts++;
+        attempts = m_sCurrentFail.failedAttempts;
+    }
 
-    Debug::log(LOG, "Failed attempts: {}", m_sCurrentFail.failedAttempts);
+    Debug::log(LOG, "Failed attempts: {}", attempts);
 
     {
         std::lock_guard<std::mutex> lock(m_timerMutex);
